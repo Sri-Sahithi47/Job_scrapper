@@ -12,7 +12,7 @@ from typing import Any, Iterable
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from shared_vendor_filters import VendorJob, clean_text, extract_contact_info, filter_and_sort_jobs, score_title, write_outputs
+from shared_vendor_filters import VendorJob, clean_text, extract_contact_info, filter_and_sort_jobs, load_phrases, score_title, write_outputs
 
 BASE_URL = "https://www.experis.com"
 API_URL = f"{BASE_URL}/api/services/Jobs/searchjobs"
@@ -77,7 +77,7 @@ def normalize(row: dict[str, Any], search_term: str) -> VendorJob:
     return VendorJob("Experis", search_term, rank, reasons, title, clean_text(row.get("domain")), clean_text(row.get("jobLocation")), clean_text(row.get("employmentType") or row.get("jobType")), "", str(row.get("publishfromDate") or ""), str(row.get("jobID") or row.get("jobItemID") or ""), job_url, job_url, extract_contact_info(raw_text), raw_text[:900], raw_text)
 
 
-def scrape(terms: Iterable[str], posted_within_days: int, exclude_disallowed_work: bool, timeout: int, limit: int, max_pages: int, retries: int, retry_sleep: float) -> list[VendorJob]:
+def scrape(terms: Iterable[str], posted_within_days: int, exclude_disallowed_work: bool, timeout: int, limit: int, max_pages: int, retries: int, retry_sleep: float, ignore_titles: Iterable[str] = ()) -> list[VendorJob]:
     seen: set[str] = set()
     jobs: list[VendorJob] = []
     for term in terms:
@@ -89,7 +89,7 @@ def scrape(terms: Iterable[str], posted_within_days: int, exclude_disallowed_wor
             seen.add(key)
             jobs.append(job)
     print(f"Extracted {len(jobs)} unique Experis jobs before filtering")
-    return filter_and_sort_jobs(jobs, posted_within_days, exclude_disallowed_work)
+    return filter_and_sort_jobs(jobs, posted_within_days, exclude_disallowed_work, ignore_titles)
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-sleep", type=float, default=1.0)
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--no-excel", action="store_true")
+    parser.add_argument("--ignore-titles-file", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -118,6 +119,7 @@ def main() -> int:
         args.max_pages,
         args.retries,
         args.retry_sleep,
+        load_phrases(args.ignore_titles_file),
     )
     write_outputs("experis", jobs, args.out_dir, args.posted_within_days, args.no_excel)
     return 0

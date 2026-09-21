@@ -86,13 +86,8 @@ TITLE_EXCLUSION_WEIGHTS = [
     ("jr ", -100),
     ("entry level", -100),
 ]
-TITLE_EXCLUSION_PATTERNS = [
-    (re.compile(r"\bjava\b.*\bfull\s*stack\b|\bfull\s*stack\b.*\bjava\b|\bjava\b.*\bfullstack\b|\bfullstack\b.*\bjava\b", re.I), "Java full stack title"),
-    (re.compile(r"\bjava\b.*\b(?:developer|engineer|architect|backend|software)\b|\b(?:developer|engineer|architect|backend|software)\b.*\bjava\b", re.I), "Java developer/engineer title"),
-    (re.compile(r"\bdata\s+engineer\b", re.I), "Data Engineer title"),
-    (re.compile(r"\bjunior\b|\bjr\.?\s", re.I), "Junior title"),
-    (re.compile(r"\bentry[\s-]level\b", re.I), "Entry-level title"),
-]
+TITLE_EXCLUSION_PATTERNS = []  # no hard-coded role/tech exclusions; search terms alone decide relevance
+IGNORE_TITLE_PHRASES: list[str] = []
 DISALLOWED_WORK_PATTERNS = [
     (re.compile(r"\bno\s+c2c\b", re.I), "No C2C"),
     (re.compile(r"\bno\s+corp(?:oration)?\s*[- ]?\s*to\s*[- ]?\s*corp(?:oration)?\b", re.I), "No corp-to-corp"),
@@ -109,7 +104,7 @@ DISALLOWED_WORK_PATTERNS = [
 ]
 EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![A-Za-z0-9._%+-])")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\d)")
-MIN_TITLE_RANK = 20
+MIN_TITLE_RANK = 0  # keep every job the search/listing returns; ranking is informational only
 
 
 @dataclass
@@ -167,8 +162,21 @@ def score_title(title: str) -> tuple[int, str]:
     return max(score, 0), "; ".join(reasons)
 
 
+
+def load_ignore_titles(path) -> list[str]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [line.strip().lower() for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def title_exclusion_reasons(title: str) -> list[str]:
-    return [reason for pattern, reason in TITLE_EXCLUSION_PATTERNS if pattern.search(title or "")]
+    reasons = [reason for pattern, reason in TITLE_EXCLUSION_PATTERNS if pattern.search(title or "")]
+    lowered = (title or "").lower()
+    reasons += [f"Ignored title phrase: {phrase}" for phrase in IGNORE_TITLE_PHRASES if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", lowered)]
+    return reasons
 
 
 def disallowed_work_reasons(text: str) -> list[str]:
@@ -575,11 +583,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sleep", type=float, default=0.3)
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--no-excel", action="store_true")
+    parser.add_argument("--ignore-titles-file", type=Path, default=None)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    IGNORE_TITLE_PHRASES[:] = load_ignore_titles(args.ignore_titles_file)
     jobs = scrape_randstad(
         load_terms(args),
         args.posted_within_days,

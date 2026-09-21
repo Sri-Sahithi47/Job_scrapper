@@ -107,13 +107,8 @@ TITLE_EXCLUSION_WEIGHTS = [
     ("jr ", -100),
     ("entry level", -100),
 ]
-TITLE_EXCLUSION_PATTERNS = [
-    (re.compile(r"\bjava\b.*\bfull\s*stack\b|\bfull\s*stack\b.*\bjava\b|\bjava\b.*\bfullstack\b|\bfullstack\b.*\bjava\b", re.I), "Java full stack title"),
-    (re.compile(r"\bjava\b.*\b(?:developer|engineer|architect|backend|software)\b|\b(?:developer|engineer|architect|backend|software)\b.*\bjava\b", re.I), "Java developer/engineer title"),
-    (re.compile(r"\bdata\s+engineer\b", re.I), "Data Engineer title"),
-    (re.compile(r"\bjunior\b|\bjr\.?\s", re.I), "Junior title"),
-    (re.compile(r"\bentry[\s-]level\b", re.I), "Entry-level title"),
-]
+TITLE_EXCLUSION_PATTERNS = []  # no hard-coded role/tech exclusions; search terms alone decide relevance
+IGNORE_TITLE_PHRASES: list[str] = []
 DISALLOWED_WORK_PATTERNS = [
     (re.compile(r"\bno\s+c2c\b", re.I), "No C2C"),
     (re.compile(r"\bno\s+corp(?:oration)?\s*[- ]?\s*to\s*[- ]?\s*corp(?:oration)?\b", re.I), "No corp-to-corp"),
@@ -239,8 +234,21 @@ def disallowed_work_reasons(text: str) -> list[str]:
     return reasons
 
 
+
+def load_ignore_titles(path) -> list[str]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [line.strip().lower() for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def title_exclusion_reasons(title: str) -> list[str]:
-    return [reason for pattern, reason in TITLE_EXCLUSION_PATTERNS if pattern.search(title or "")]
+    reasons = [reason for pattern, reason in TITLE_EXCLUSION_PATTERNS if pattern.search(title or "")]
+    lowered = (title or "").lower()
+    reasons += [f"Ignored title phrase: {phrase}" for phrase in IGNORE_TITLE_PHRASES if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", lowered)]
+    return reasons
 
 
 def parse_pay_range(text: str) -> tuple[Optional[float], Optional[float], str]:
@@ -568,11 +576,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sleep", type=float, default=0.2)
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--no-excel", action="store_true")
+    parser.add_argument("--ignore-titles-file", type=Path, default=None)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    IGNORE_TITLE_PHRASES[:] = load_ignore_titles(args.ignore_titles_file)
     jobs = scrape_apex(
         load_terms(args),
         args.posted_within_days,

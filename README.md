@@ -328,6 +328,19 @@ Use `--help` on any scraper to see exact options:
 python3 judgegroup_applying_script/judgegroup_scraper.py --help
 ```
 
+Robert Half, Mitchell Martin, and Insight Global fetch all result pages for each
+search term by default. Robert Half accepts `--max-pages 0` for unlimited pages;
+an explicit positive limit prints a truncation warning. Mitchell Martin's
+`--page-size` (also accepted as the legacy `--max-jobs`) controls the request size,
+not the total number of jobs fetched. Insight Global uses the public consultant
+board at `insightglobal.com/jobs`, including job descriptions, rather than the
+separate corporate careers board.
+
+These three scrapers retry temporary HTTP failures and fail the run if a page
+cannot be retrieved or pagination repeats. A failed run does not write a new
+output file. Posting-date, employment, and ignored-title filters still apply
+after retrieval, so output counts can be lower than the portal's search totals.
+
 ## Website Usage Notes
 
 This project reads public job pages, feeds, or public API responses and writes local filtered results. The dashboard does not submit applications unless you explicitly click an apply automation control and provide applicant settings.

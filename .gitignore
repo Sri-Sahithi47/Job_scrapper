@@ -37,3 +37,18 @@ Prime vendor list*.xlsx
 # Local launch/build artifacts
 *.app/
 *.plist
+
+# Job portal dashboard build/runtime artifacts
+java-dashboard/apache-maven-*/
+java-dashboard/apache-maven-*.tar.gz
+java-dashboard/backend/target/
+java-dashboard/frontend/dist/
+java-dashboard/frontend/.vite/
+java-dashboard/**/node_modules/
+java-dashboard/**/*.log
+
+# Per-run dashboard AI decisions
+**/.dashboard_ai_hidden.json
+
+# Keep the Vite entrypoint even though captured HTML is ignored above
+!java-dashboard/frontend/index.html

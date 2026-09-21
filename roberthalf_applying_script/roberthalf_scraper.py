@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
-import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from shared_vendor_filters import VendorJob, clean_text, extract_contact_info, filter_and_sort_jobs, score_title, write_outputs
+from shared_vendor_filters import VendorJob, clean_text, extract_contact_info, filter_and_sort_jobs, load_phrases, score_title, write_outputs
+
+from shared_vendor_http import search_session
 
 BASE_URL = "https://www.roberthalf.com"
 SEARCH_URL = f"{BASE_URL}/bin/jobSearchServlet"
@@ -64,7 +65,9 @@ def search_payload(keywords: str, page: int, page_size: int) -> dict[str, Any]:
 
 
 def fetch_jobs(terms: list[str], max_pages: int, page_size: int, timeout: int) -> list[dict[str, Any]]:
-    session = requests.Session()
+    if max_pages < 0 or page_size < 1:
+        raise ValueError("max_pages must be nonnegative and page_size must be positive")
+    session = search_session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Content-Type": "application/json",
@@ -76,17 +79,28 @@ def fetch_jobs(terms: list[str], max_pages: int, page_size: int, timeout: int) -
     all_jobs: list[dict[str, Any]] = []
     for term in terms:
         term_count = 0
-        for page in range(1, max_pages + 1):
-            try:
-                response = session.post(SEARCH_URL, json=search_payload(term, page, page_size), timeout=timeout)
-                response.raise_for_status()
-                data = response.json()
-            except (requests.RequestException, ValueError) as exc:
-                print(f"Robert Half: '{term}' page {page} failed: {exc}")
-                break
-            jobs = data.get("jobs") or []
+        page = 1
+        term_seen: set[str] = set()
+        received = 0
+        while not max_pages or page <= max_pages:
+            response = session.post(SEARCH_URL, json=search_payload(term, page, page_size), timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict) or data.get("request_status") != "SUCCESS":
+                raise ValueError(f"Robert Half: '{term}' page {page}: unsuccessful search response")
+            jobs = data.get("jobs")
+            if not isinstance(jobs, list):
+                raise ValueError(f"Robert Half: '{term}' page {page}: missing jobs list")
+            total = int(data["found"]) if data.get("found") is not None else None
             if not jobs:
+                if total is not None and received < total:
+                    raise ValueError(f"Robert Half: '{term}' ended before all {total} jobs were retrieved")
                 break
+            page_ids = {str(job.get("unique_job_number") or job.get("sf_jo_number") or job.get("job_detail_url") or "") for job in jobs}
+            if not page_ids - term_seen:
+                raise ValueError(f"Robert Half: '{term}' page {page} repeated; scrape is incomplete")
+            term_seen.update(page_ids)
+            received += len(jobs)
             for job in jobs:
                 job_id = str(job.get("unique_job_number") or job.get("sf_jo_number") or job.get("job_detail_url") or "")
                 if job_id and job_id in seen_ids:
@@ -95,8 +109,13 @@ def fetch_jobs(terms: list[str], max_pages: int, page_size: int, timeout: int) -
                     seen_ids.add(job_id)
                 all_jobs.append(job)
                 term_count += 1
-            if len(jobs) < page_size:
+            if total is not None and received >= total:
                 break
+            if total is None and len(jobs) < page_size:
+                break
+            if max_pages and page == max_pages:
+                print(f"Robert Half: WARNING '{term}' truncated by --max-pages={max_pages}", file=sys.stderr)
+            page += 1
         print(f"Robert Half: '{term}' -> {term_count} jobs")
     print(f"Robert Half: {len(all_jobs)} unique jobs before filtering")
     return all_jobs
@@ -107,7 +126,7 @@ def normalize(row: dict[str, Any]) -> VendorJob:
     raw_text = clean_text(" ".join(str(row.get(k) or "") for k in ("description", "skills")))
     rank, reasons = score_title(title, raw_text)
     location = clean_text(", ".join(x for x in [row.get("city"), row.get("stateprovince")] if x))
-    salary = clean_text(" - ".join(x for x in [row.get("payrate_min"), row.get("payrate_max")] if x))
+    salary = clean_text(" - ".join(str(x) for x in [row.get("payrate_min"), row.get("payrate_max")] if x is not None and x != ""))
     return VendorJob(
         "Robert Half",
         "jobSearchServlet",
@@ -120,8 +139,8 @@ def normalize(row: dict[str, Any]) -> VendorJob:
         salary,
         str(row.get("date_posted") or ""),
         str(row.get("unique_job_number") or row.get("sf_jo_number") or ""),
-        str(row.get("job_detail_url") or ""),
-        str(row.get("job_detail_url") or ""),
+        urljoin(BASE_URL, str(row.get("job_detail_url") or "")),
+        urljoin(BASE_URL, str(row.get("job_detail_url") or "")),
         extract_contact_info(raw_text),
         raw_text[:900],
         raw_text,
@@ -136,8 +155,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--no-excel", action="store_true")
     parser.add_argument("--terms-file", type=Path, default=None)
-    parser.add_argument("--max-pages", type=int, default=3)
+    parser.add_argument("--max-pages", type=int, default=0, help="Pages per term; 0 fetches all pages (default).")
     parser.add_argument("--page-size", type=int, default=25)
+    parser.add_argument("--ignore-titles-file", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -146,7 +166,7 @@ def main() -> int:
     terms = load_terms(args.terms_file)
     raw_jobs = fetch_jobs(terms, args.max_pages, args.page_size, args.timeout)
     jobs = [normalize(row) for row in raw_jobs]
-    filtered = filter_and_sort_jobs(jobs, args.posted_within_days, not args.keep_w2_f2f_onsite_interview)
+    filtered = filter_and_sort_jobs(jobs, args.posted_within_days, not args.keep_w2_f2f_onsite_interview, load_phrases(args.ignore_titles_file))
     write_outputs("roberthalf", filtered, args.out_dir, args.posted_within_days, args.no_excel)
     return 0
 

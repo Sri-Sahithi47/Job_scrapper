@@ -52,14 +52,7 @@ TITLE_EXCLUSION_WEIGHTS = [
     ("mobile developer", -40), ("junior", -100), ("jr ", -100), ("entry level", -100),
 ]
 
-TITLE_EXCLUSION_PATTERNS = [
-    (re.compile(r"\bjava\b.*\bfull\s*stack\b|\bfull\s*stack\b.*\bjava\b|\bjava\b.*\bfullstack\b|\bfullstack\b.*\bjava\b", re.I), "Java full stack title"),
-    (re.compile(r"\bjava\b.*\b(?:developer|engineer|architect|backend|software)\b|\b(?:developer|engineer|architect|backend|software)\b.*\bjava\b", re.I), "Java developer/engineer title"),
-    (re.compile(r"\bjunior\b|\bjr\.?\s", re.I), "Junior title"),
-    (re.compile(r"\bentry[\s-]level\b", re.I), "Entry-level title"),
-    (re.compile(r"\bintern(ship)?\b", re.I), "Intern title"),
-    (re.compile(r"\bembedded\b", re.I), "Embedded title"),
-]
+TITLE_EXCLUSION_PATTERNS = []  # no hard-coded role/tech exclusions; search terms alone decide relevance
 
 ROLE_EXCLUSION_PATTERNS = [
     (re.compile(r"\bembedded\s+software\b", re.I), "Embedded software"),
@@ -91,7 +84,7 @@ DISALLOWED_WORK_PATTERNS = [
 
 EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![A-Za-z0-9._%+-])")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\d)")
-MIN_TITLE_RANK = 20
+MIN_TITLE_RANK = 0  # keep every job the search/listing returns; ranking is informational only
 
 
 @dataclass
@@ -168,6 +161,10 @@ def parse_posted_date(value: Any) -> Optional[datetime]:
             pass
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
+    # Some feeds (including Insight Global) use tenths of a second. Python
+    # versions before 3.11 only accept three or six fractional digits here.
+    text = re.sub(r"(T\d{2}:\d{2}:\d{2})\.(\d+)",
+                  lambda match: match[1] + "." + (match[2] + "000000")[:6], text)
     if re.search(r"[+-]\d{4}$", text):
         text = text[:-5] + text[-5:-2] + ":" + text[-2:]
     try:
@@ -211,6 +208,15 @@ def extract_contact_info(text: str) -> str:
     return ", ".join(emails + phones)
 
 
+def load_phrases(path: Optional[Path]) -> list[str]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [line.strip() for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def disallowed_work_reasons(text: str) -> list[str]:
     cleaned = clean_text(text)
     reasons = []
@@ -220,7 +226,13 @@ def disallowed_work_reasons(text: str) -> list[str]:
     return reasons
 
 
-def filter_and_sort_jobs(jobs: Iterable[VendorJob], posted_within_days: Optional[int], exclude_disallowed_work: bool) -> list[VendorJob]:
+def filter_and_sort_jobs(
+    jobs: Iterable[VendorJob],
+    posted_within_days: Optional[int],
+    exclude_disallowed_work: bool,
+    ignore_titles: Iterable[str] = (),
+) -> list[VendorJob]:
+    ignore_phrases = [p.strip().lower() for p in ignore_titles if p and p.strip()]
     kept = []
     for job in jobs:
         if not is_within_posted_days(job.posted_date, posted_within_days):
@@ -229,6 +241,8 @@ def filter_and_sort_jobs(jobs: Iterable[VendorJob], posted_within_days: Optional
             print(f"  Skipped low-rank ({job.title_rank}): {job.title}")
             continue
         title_reasons = [reason for pattern, reason in TITLE_EXCLUSION_PATTERNS if pattern.search(job.title or "")]
+        lowered_title = (job.title or "").lower()
+        title_reasons += [f"Ignored title phrase: {phrase}" for phrase in ignore_phrases if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", lowered_title)]
         if title_reasons:
             print(f"  Excluded ({', '.join(title_reasons)}): {job.title}")
             continue

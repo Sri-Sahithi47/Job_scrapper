@@ -1377,7 +1377,6 @@ HTML = r"""<!doctype html>
           </details>
         </div>
       </div>
-      <div class="notice">Weekends are skipped for the two-portal rotation. Scrape All 15 is the daily safety net.</div>
     </aside>
     <section>
       <div class="toolbar">

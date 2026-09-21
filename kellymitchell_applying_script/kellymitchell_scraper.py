@@ -11,7 +11,7 @@ from typing import Any, Iterable
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from shared_vendor_filters import VendorJob, clean_text, extract_contact_info, filter_and_sort_jobs, parse_posted_date, score_title, write_outputs
+from shared_vendor_filters import VendorJob, clean_text, extract_contact_info, filter_and_sort_jobs, load_phrases, parse_posted_date, score_title, write_outputs
 
 
 BASE_URL = "https://www.careers.kellymitchell.com"
@@ -57,7 +57,7 @@ def normalize(row: dict[str, Any], search_term: str) -> VendorJob:
     return VendorJob("KellyMitchell", search_term, rank, reasons, title, category, location, employment, salary, posted_date, str(job.get("id") or ""), job_url, job_url, extract_contact_info(raw_text), raw_text[:900], raw_text)
 
 
-def scrape(terms: Iterable[str], posted_within_days: int, exclude_disallowed_work: bool, timeout: int, jobs_per_page: int) -> list[VendorJob]:
+def scrape(terms: Iterable[str], posted_within_days: int, exclude_disallowed_work: bool, timeout: int, jobs_per_page: int, ignore_titles: Iterable[str] = ()) -> list[VendorJob]:
     seen: set[str] = set()
     jobs: list[VendorJob] = []
     for term in terms:
@@ -69,7 +69,7 @@ def scrape(terms: Iterable[str], posted_within_days: int, exclude_disallowed_wor
             seen.add(key)
             jobs.append(job)
     print(f"Extracted {len(jobs)} unique KellyMitchell jobs before filtering")
-    return filter_and_sort_jobs(jobs, posted_within_days, exclude_disallowed_work)
+    return filter_and_sort_jobs(jobs, posted_within_days, exclude_disallowed_work, ignore_titles)
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,12 +81,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jobs-per-page", type=int, default=50)
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--no-excel", action="store_true")
+    parser.add_argument("--ignore-titles-file", type=Path, default=None)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    jobs = scrape(args.terms or DEFAULT_SEARCH_TERMS, args.posted_within_days, not args.keep_w2_f2f_onsite_interview, args.timeout, args.jobs_per_page)
+    jobs = scrape(args.terms or DEFAULT_SEARCH_TERMS, args.posted_within_days, not args.keep_w2_f2f_onsite_interview, args.timeout, args.jobs_per_page, load_phrases(args.ignore_titles_file))
     write_outputs("kellymitchell", jobs, args.out_dir, args.posted_within_days, args.no_excel)
     return 0
 

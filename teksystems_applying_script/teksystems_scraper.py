@@ -8,6 +8,7 @@ import csv
 import html
 import json
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -21,8 +22,12 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from shared_vendor_http import search_session
+
 BASE_URL = "https://careers.teksystems.com"
 SEARCH_URL = f"{BASE_URL}/us/en/search-results?keywords={{query}}&from=0&s=1"
+API_URL = f"{BASE_URL}/widgets"
 
 DEFAULT_SEARCH_TERMS = [
     "python developer",
@@ -132,13 +137,8 @@ TITLE_EXCLUSION_WEIGHTS = [
     ("entry level", -100),
 ]
 
-TITLE_EXCLUSION_PATTERNS = [
-    (re.compile(r"\bjava\b.*\bfull\s*stack\b|\bfull\s*stack\b.*\bjava\b|\bjava\b.*\bfullstack\b|\bfullstack\b.*\bjava\b", re.I), "Java full stack title"),
-    (re.compile(r"\bjava\b.*\b(?:developer|engineer|architect|backend|software)\b|\b(?:developer|engineer|architect|backend|software)\b.*\bjava\b", re.I), "Java developer/engineer title"),
-    (re.compile(r"\bjunior\b|\bjr\.?\s", re.I), "Junior title"),
-    (re.compile(r"\bentry[\s-]level\b", re.I), "Entry-level title"),
-    (re.compile(r"\bintern(ship)?\b", re.I), "Intern title"),
-]
+TITLE_EXCLUSION_PATTERNS = []  # no hard-coded role/tech exclusions; search terms alone decide relevance
+IGNORE_TITLE_PHRASES: list[str] = []
 
 DISALLOWED_WORK_PATTERNS = [
     (re.compile(r"\bno\s+c2c\b", re.I), "No C2C"),
@@ -163,7 +163,7 @@ DISALLOWED_WORK_PATTERNS = [
 
 EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![A-Za-z0-9._%+-])")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\d)")
-MIN_TITLE_RANK = 20
+MIN_TITLE_RANK = 0  # keep every job the search/listing returns; ranking is informational only
 
 
 @dataclass
@@ -222,8 +222,21 @@ def score_title(title: str) -> tuple[int, str]:
     return max(score, 0), "; ".join(reasons)
 
 
+
+def load_ignore_titles(path) -> list[str]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [line.strip().lower() for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def title_exclusion_reasons(title: str) -> list[str]:
-    return [reason for pattern, reason in TITLE_EXCLUSION_PATTERNS if pattern.search(title or "")]
+    reasons = [reason for pattern, reason in TITLE_EXCLUSION_PATTERNS if pattern.search(title or "")]
+    lowered = (title or "").lower()
+    reasons += [f"Ignored title phrase: {phrase}" for phrase in IGNORE_TITLE_PHRASES if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", lowered)]
+    return reasons
 
 
 def disallowed_work_reasons(text: str) -> list[str]:
@@ -286,7 +299,7 @@ def is_within_posted_days(posted_date: str, days: Optional[int]) -> bool:
 
 
 def make_session() -> requests.Session:
-    session = requests.Session()
+    session = search_session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -333,6 +346,70 @@ def extract_eager_search(html_text: str) -> dict[str, Any]:
 
 def search_url(term: str) -> str:
     return SEARCH_URL.format(query=quote_plus(term))
+
+
+def search_payload(term: str, offset: int, page_size: int = 10) -> dict[str, Any]:
+    return {
+        "lang": "en", "deviceType": "desktop", "country": "us",
+        "pageName": "search-results", "ddoKey": "refineSearch",
+        "keywords": term, "from": offset, "size": page_size,
+        "jobs": True, "counts": True, "selected_fields": {},
+        "sort": {"field": "postedDate", "order": "desc"},
+        # Phenom applies its default 50-mile radius even with an empty location.
+        # This is the public site's unbounded "100+ miles" slider setting.
+        "locationData": {
+            "aboveMaxRadius": True, "sliderRadius": 105, "LocationUnit": "miles",
+            "placeVal": "", "latitude": "", "longitude": "", "place_id": "",
+        },
+    }
+
+
+def fetch_search_rows(session: requests.Session, term: str, timeout: int,
+                      sleep_seconds: float) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    offset = 0
+    while True:
+        response = session.post(API_URL, json=search_payload(term, offset), timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
+        payload = body.get("refineSearch") if isinstance(body, dict) else None
+        if not isinstance(payload, dict) or payload.get("status") != 200:
+            raise ValueError(f"TEKsystems '{term}' offset {offset}: unsuccessful search response")
+        data = payload.get("data") or {}
+        batch = data.get("jobs")
+        if not isinstance(batch, list) or "totalHits" not in payload:
+            raise ValueError(f"TEKsystems '{term}' offset {offset}: missing jobs or totalHits")
+        total = int(payload["totalHits"])
+        query = (payload.get("eid") or {}).get("query")
+        if query is not None and query.strip().casefold() != term.strip().casefold():
+            raise ValueError(f"TEKsystems returned results for '{query}' instead of '{term}'")
+        location = data.get("locationData") or {}
+        if location.get("aboveMaxRadius") is False:
+            raise ValueError("TEKsystems unexpectedly applied a distance limit")
+        if not batch:
+            if offset < total:
+                raise ValueError(f"TEKsystems '{term}': empty page before all {total} results were retrieved")
+            break
+        page_ids = set()
+        for row in batch:
+            if not isinstance(row, dict):
+                raise ValueError("TEKsystems returned an invalid job")
+            key = clean_text(row.get("jobSeqNo") or row.get("jobId") or row.get("reqId"))
+            if not key:
+                raise ValueError("TEKsystems returned a job without an ID")
+            page_ids.add(key)
+            if key not in seen:
+                rows.append(row)
+        if not page_ids - seen:
+            raise ValueError(f"TEKsystems '{term}' offset {offset}: repeated page; scrape is incomplete")
+        seen.update(page_ids)
+        offset += len(batch)
+        print(f"  Retrieved {offset}/{total} results (no distance limit)")
+        if offset >= total:
+            break
+        time.sleep(sleep_seconds)
+    return rows
 
 
 def job_detail_url(row: dict[str, Any]) -> str:
@@ -412,20 +489,8 @@ def scrape_teksystems(
         term = term.strip()
         if not term:
             continue
-        url = search_url(term)
-        print(f"Searching TEKsystems: {term} -> {url}")
-        try:
-            response = session.get(url, timeout=timeout)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            print(f"  Request failed: {exc}")
-            time.sleep(sleep_seconds)
-            continue
-
-        payload = extract_eager_search(response.text)
-        data = payload.get("data") or {}
-        rows = [row for row in data.get("jobs") or [] if isinstance(row, dict)]
-        print(f"  Found {data.get('totalHits', len(rows))} total, {len(rows)} on page")
+        print(f"Searching TEKsystems: {term} (all locations; distance unrestricted)")
+        rows = fetch_search_rows(session, term, timeout, sleep_seconds)
 
         for row in rows:
             key = clean_text(row.get("jobSeqNo") or row.get("jobId") or row.get("reqId"))
@@ -455,6 +520,7 @@ def scrape_teksystems(
             jobs.append(job)
         time.sleep(sleep_seconds)
 
+    print(f"TEKsystems: {len(seen)} unique search results, {len(jobs)} retained after filters")
     return sort_jobs(jobs)
 
 
@@ -599,11 +665,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sleep", type=float, default=0.5)
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--no-excel", action="store_true")
+    parser.add_argument("--ignore-titles-file", type=Path, default=None)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    IGNORE_TITLE_PHRASES[:] = load_ignore_titles(args.ignore_titles_file)
     jobs = scrape_teksystems(
         load_terms(args),
         args.posted_within_days,
